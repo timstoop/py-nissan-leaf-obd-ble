@@ -41,6 +41,10 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+## Configurable BLE UUIDs
+
+The default GATT service and characteristic UUIDs match the LeLink OBD BLE dongle. When used with the Home Assistant integration, the service and read/write characteristic UUIDs are configurable per device in the UI. For custom use, `async_get_data(options=None)` accepts an optional `options` dict with keys `service_uuid`, `characteristic_uuid_read`, and `characteristic_uuid_write`; omit keys to use the library defaults.
+
 ## License
 
 This package includes code derived from **python-OBD (a derivative of pyOBD)**,
