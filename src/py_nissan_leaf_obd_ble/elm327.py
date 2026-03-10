@@ -69,16 +69,22 @@ class ELM327:
         self,
         ble_device: BLEDevice,
         timeout,
+        service_uuid=None,
+        characteristic_uuid_read=None,
+        characteristic_uuid_write=None,
     ) -> None:
         """Initialise."""
         self.__status = OBDStatus.NOT_CONNECTED
         self.__low_power = False
         self.timeout = timeout
+        svc = service_uuid or self.SERVICE_UUID
+        read_char = characteristic_uuid_read or self.CHARACTERISTIC_UUID_READ
+        write_char = characteristic_uuid_write or self.CHARACTERISTIC_UUID_WRITE
         self.__port: bleserial | None = bleserial(
             ble_device,
-            self.SERVICE_UUID,
-            self.CHARACTERISTIC_UUID_READ,
-            self.CHARACTERISTIC_UUID_WRITE,
+            svc,
+            read_char,
+            write_char,
         )
         self.__protocol = ISO_15765_4_11bit_500k()
 
@@ -90,9 +96,18 @@ class ELM327:
         timeout,
         check_voltage=True,
         start_low_power=False,
+        service_uuid=None,
+        characteristic_uuid_read=None,
+        characteristic_uuid_write=None,
     ):
         """Initialize ELM327."""
-        self = cls(ble_device, timeout)
+        self = cls(
+            ble_device,
+            timeout,
+            service_uuid=service_uuid,
+            characteristic_uuid_read=characteristic_uuid_read,
+            characteristic_uuid_write=characteristic_uuid_write,
+        )
 
         logger.info(
             "Initializing ELM327: PROTOCOL=%s",

@@ -66,21 +66,44 @@ class OBD:
         timeout=0.1,
         check_voltage=True,
         start_low_power=False,
+        service_uuid=None,
+        characteristic_uuid_read=None,
+        characteristic_uuid_write=None,
     ):
         """Manufacture instance."""
         self = cls(device, fast, timeout)
 
         logger.debug("Connecting to BLEDevice")
         await self.__connect(
-            protocol, check_voltage, start_low_power
-        )  # initialize by connecting and loading sensors
+            protocol,
+            check_voltage,
+            start_low_power,
+            service_uuid=service_uuid,
+            characteristic_uuid_read=characteristic_uuid_read,
+            characteristic_uuid_write=characteristic_uuid_write,
+        )
         return self
 
-    async def __connect(self, protocol, check_voltage, start_low_power):
+    async def __connect(
+        self,
+        protocol,
+        check_voltage,
+        start_low_power,
+        service_uuid=None,
+        characteristic_uuid_read=None,
+        characteristic_uuid_write=None,
+    ):
         """Attempt to instantiate an ELM327 connection object."""
 
         self.interface = await ELM327.create(
-            self.__device, protocol, self.timeout, check_voltage, start_low_power
+            self.__device,
+            protocol,
+            self.timeout,
+            check_voltage,
+            start_low_power,
+            service_uuid=service_uuid,
+            characteristic_uuid_read=characteristic_uuid_read,
+            characteristic_uuid_write=characteristic_uuid_write,
         )
 
         # if the connection failed, close it

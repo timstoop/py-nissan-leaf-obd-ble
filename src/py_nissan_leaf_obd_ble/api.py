@@ -21,13 +21,24 @@ class NissanLeafObdBleApiClient:
         """Initialise."""
         self._ble_device = ble_device
 
-    async def async_get_data(self) -> dict | None:
+    async def async_get_data(self, options=None) -> dict | None:
         """Get data from the API."""
 
         if self._ble_device is None:
             return {}
 
-        api = await OBD.create(self._ble_device, protocol="6")
+        opts = options or {}
+        service_uuid = opts.get("service_uuid")
+        characteristic_uuid_read = opts.get("characteristic_uuid_read")
+        characteristic_uuid_write = opts.get("characteristic_uuid_write")
+
+        api = await OBD.create(
+            self._ble_device,
+            protocol="6",
+            service_uuid=service_uuid,
+            characteristic_uuid_read=characteristic_uuid_read,
+            characteristic_uuid_write=characteristic_uuid_write,
+        )
 
         if api is None:
             return None
