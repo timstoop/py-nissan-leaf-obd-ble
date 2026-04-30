@@ -31,6 +31,7 @@
 ########################################################################
 
 import asyncio
+from contextlib import suppress
 import logging
 import re
 
@@ -115,23 +116,23 @@ class ELM327:
         )
 
         # ------------- open port -------------
+        # bleserial.open() already runs _force_close on its own error paths,
+        # so by the time an exception bubbles up here the BLE slot has been
+        # released. Re-raise so the integration coordinator sees the real
+        # failure (e.g. BleakOutOfConnectionSlotsError) and can go dormant
+        # instead of silently treating the empty session as "car is off".
         try:
-            if not self.__port:
-                logger.error("error: attempting to open a null port!")
-            else:
-                logger.debug("looks like the __port is all good: %s", self.__port)
-
+            if self.__port is None:
+                raise RuntimeError("ELM327 port is None")
             logger.debug("attempt to open the port: %s", self.__port)
-
-            if self.__port is not None:
-                await self.__port.open()
-
+            await self.__port.open()
         except Exception as e:
-            logger.warning(
-                "An error occurred: %s %s",
-                ("auto" if protocol is None else protocol, e),
+            logger.error(
+                "ELM327 open failed (protocol=%s): %s",
+                "auto" if protocol is None else protocol,
+                e,
             )
-            return self
+            raise
 
         # If we start with the IC in the low power state we need to wake it up
         if start_low_power:
@@ -293,11 +294,15 @@ class ELM327:
 
         self.__status = OBDStatus.NOT_CONNECTED
 
-        if self.__port is not None:
-            logger.info("closing port")
-            await self.__write(b"ATZ")
-            await self.__port.close()
-            self.__port = None
+        if self.__port is None:
+            return
+        port, self.__port = self.__port, None
+        logger.info("closing port")
+        # Best-effort device reset. Don't let a broken BLE link prevent close().
+        with suppress(Exception):
+            await port.write(b"ATZ\r")
+        with suppress(Exception):
+            await port.close()
 
     async def send_and_parse(self, cmd) -> list[Message] | None:
         """Send OBDCommands.
@@ -349,20 +354,22 @@ class ELM327:
     async def __write(self, cmd):
         """Low-level function to write a string to the port."""
 
-        if self.__port:
-            cmd += b"\r"  # terminate with carriage return in accordance with ELM327 and STN11XX specifications
-            logger.debug("write: " + repr(cmd))
-            try:
-                self.__port.reset_input_buffer()  # dump everything in the input buffer
-                await self.__port.write(cmd)  # turn the string into bytes and write
-            except Exception as e:
-                logger.critical("Device disconnected while writing: %s", e)
-                self.__status = OBDStatus.NOT_CONNECTED
-                await self.__port.close()
-                self.__port = None
-                return
-        else:
+        if not self.__port:
             logger.info("cannot perform __write() when unconnected")
+            return
+
+        cmd += b"\r"
+        logger.debug("write: %s", repr(cmd))
+        try:
+            self.__port.reset_input_buffer()
+            await self.__port.write(cmd)
+        except Exception as e:
+            logger.error("Device disconnected while writing: %s", e)
+            self.__status = OBDStatus.NOT_CONNECTED
+            port, self.__port = self.__port, None
+            with suppress(Exception):
+                await port.close()
+            raise
 
     async def __read(self, end_marker=ELM_PROMPT):
         """Low-level read function.
@@ -381,12 +388,13 @@ class ELM327:
             # retrieve as much data as possible
             try:
                 data = await self.__port.read(self.__port.in_waiting or 1)
-            except Exception:
+            except Exception as e:
+                logger.error("Device disconnected while reading: %s", e)
                 self.__status = OBDStatus.NOT_CONNECTED
-                await self.__port.close()
-                self.__port = None
-                logger.critical("Device disconnected while reading")
-                return []
+                port, self.__port = self.__port, None
+                with suppress(Exception):
+                    await port.close()
+                raise
 
             # if nothing was received
             if not data:

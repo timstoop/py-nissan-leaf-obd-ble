@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "py-nissan-leaf-obd-ble"
-version = "0.1.1"
+version = "0.1.2.dev0"
 description = "Python hardware API for Nissan Leaf OBD BLE dongles (BLE + ELM327 over CAN), extracted from the Home Assistant integration."
 readme = "README.md"
 requires-python = ">=3.9"

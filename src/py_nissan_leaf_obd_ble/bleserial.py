@@ -18,6 +18,15 @@ from bleak_retry_connector import (
 
 logger = logging.getLogger(__name__)
 
+# Timeouts that bound how long any single BLE operation may hold a
+# connection slot on the proxy. On the ESP32 NimBLE stack each failed
+# attempt without a clean disconnect leaves a slot occupied; bounding the
+# operations and force-disconnecting on timeout/error releases the slot
+# instead of letting it accumulate forever.
+DEFAULT_CONNECT_TIMEOUT = 30.0
+DEFAULT_IO_TIMEOUT = 10.0
+DEFAULT_DISCONNECT_TIMEOUT = 3.0
+
 
 class bleserial:
     """Encapsulates the ble connection and make it appear something like a UART port."""
@@ -30,6 +39,8 @@ class bleserial:
         service_uuid,
         characteristic_uuid_read,
         characteristic_uuid_write,
+        connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
+        io_timeout: float = DEFAULT_IO_TIMEOUT,
     ) -> None:
         """Initialise."""
         self._ble_device: BLEDevice = ble_device
@@ -42,6 +53,8 @@ class bleserial:
         self._closing = False
         self._close_lock = asyncio.Lock()
         self._write_timeout = None
+        self._connect_timeout = connect_timeout
+        self._io_timeout = io_timeout
 
     async def _wait_for_data(self, size):
         while len(self._rx_buffer) < size:
@@ -113,12 +126,15 @@ class bleserial:
 
         try:
             logger.debug("Connecting to ble_device: %s %s", self._ble_device, self._ble_device.name)
-            self._client = await establish_connection(
-                BleakClientWithServiceCache,  # Use BleakClientWithServiceCache for service caching
-                self._ble_device,
-                self._ble_device.name or "Unknown Device",
-                disconnected_callback=on_disconnect,
-                max_attempts=3,  # Will retry up to 3 times with backoff
+            self._client = await asyncio.wait_for(
+                establish_connection(
+                    BleakClientWithServiceCache,
+                    self._ble_device,
+                    self._ble_device.name or "Unknown Device",
+                    disconnected_callback=on_disconnect,
+                    max_attempts=3,
+                ),
+                timeout=self._connect_timeout,
             )
 
             logger.debug("Connected to ble_device: %s", self._ble_device)
@@ -126,36 +142,52 @@ class bleserial:
                 "Starting notifications on characteristic UUID: %s",
                 self._characteristic_uuid_read,
             )
-            await self._client.start_notify(
-                self._characteristic_uuid_read, self._notification_handler
+            await asyncio.wait_for(
+                self._client.start_notify(
+                    self._characteristic_uuid_read, self._notification_handler
+                ),
+                timeout=self._connect_timeout,
             )
             logger.debug("Notifications started")
 
         except BleakNotFoundError as e:
             logger.error("Device not found - it may have moved out of range: %s", e)
-            self._closing = False
+            await self._force_close()
             raise
 
         except BleakOutOfConnectionSlotsError:
             logger.error(
                 "No connection slots available - try disconnecting other devices"
             )
-            self._closing = False
+            await self._force_close()
             raise
 
         except BleakAbortedError:
             logger.error("Connection aborted - check for interference or move closer")
-            self._closing = False
+            await self._force_close()
             raise
 
         except BleakConnectionError as e:
             logger.error("Connection failed: %s", e)
-            self._closing = False
+            await self._force_close()
             raise
 
         except BleakError as e:
             logger.error("Failed to connect or start notifications: %s", e)
-            self._closing = False
+            await self._force_close()
+            raise
+
+        except asyncio.TimeoutError:
+            logger.error(
+                "Timed out connecting/starting notifications after %.1fs",
+                self._connect_timeout,
+            )
+            await self._force_close()
+            raise
+
+        except asyncio.CancelledError:
+            logger.warning("open() cancelled; releasing BLE slot")
+            await self._force_close()
             raise
 
     async def close(self):
@@ -172,46 +204,98 @@ class bleserial:
                     "Stopping notifications on characteristic UUID: %s",
                     self._characteristic_uuid_read,
                 )
-                with suppress(BleakError):
-                    await client.stop_notify(self._characteristic_uuid_read)
+                with suppress(BleakError, asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        client.stop_notify(self._characteristic_uuid_read),
+                        timeout=DEFAULT_DISCONNECT_TIMEOUT,
+                    )
                 logger.debug("Disconnecting from device")
-                await client.disconnect()
+                with suppress(BleakError, asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        client.disconnect(),
+                        timeout=DEFAULT_DISCONNECT_TIMEOUT,
+                    )
                 logger.debug("Disconnected from device")
             finally:
                 self._client = None
                 self._closing = False
 
+    async def _force_close(self):
+        """Best-effort disconnect that releases the BLE proxy slot.
+
+        Safe to call from any error path -- never raises.
+        """
+        client = self._client
+        self._client = None
+        self._closing = True
+        try:
+            if client is None:
+                return
+            try:
+                await asyncio.wait_for(
+                    client.disconnect(), timeout=DEFAULT_DISCONNECT_TIMEOUT
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "force_close: disconnect did not complete cleanly: %s", e
+                )
+        finally:
+            self._closing = False
+
     async def write(self, data):
         """Write bytes."""
         if isinstance(data, str):
             data = data.encode()
+        if self._client is None:
+            return
         try:
             logger.info(
                 "Writing data to characteristic UUID: %s Data: %s",
                 self._characteristic_uuid_write,
                 data,
             )
-            if self._client is not None:
-                await self._client.write_gatt_char(
+            await asyncio.wait_for(
+                self._client.write_gatt_char(
                     self._characteristic_uuid_write, data
-                )
+                ),
+                timeout=self._io_timeout,
+            )
             logger.debug("Data written")
         except BleakError as e:
             logger.error("Failed to write data: %s", e)
+            await self._force_close()
+            raise
+        except asyncio.TimeoutError:
+            logger.error("Timed out writing data after %.1fs", self._io_timeout)
+            await self._force_close()
+            raise
+        except asyncio.CancelledError:
+            await self._force_close()
             raise
 
     async def read(self, size=1):
         """Read from the buffer."""
         try:
             logger.debug("Reading %s bytes of data", size)
-            while len(self._rx_buffer) < size:
-                await asyncio.sleep(0.01)
+            await asyncio.wait_for(
+                self._wait_for_data(size), timeout=self._io_timeout
+            )
             data = self._rx_buffer[:size]
             self._rx_buffer = self._rx_buffer[size:]
             logger.debug("Read data: %s", data)
             return bytes(data)
+        except asyncio.TimeoutError:
+            logger.error(
+                "Timed out reading %d bytes after %.1fs", size, self._io_timeout
+            )
+            await self._force_close()
+            raise
+        except asyncio.CancelledError:
+            await self._force_close()
+            raise
         except Exception as e:
             logger.error("Failed to read data: %s", e)
+            await self._force_close()
             raise
 
     async def readline(self):
